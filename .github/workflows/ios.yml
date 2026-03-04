@@ -1,0 +1,84 @@
+name: iOS Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Select Xcode Version
+      run: sudo xcode-select -s /Applications/Xcode_15.0.app/Contents/Developer
+
+    - name: Show Xcode Version
+      run: xcodebuild -version
+
+    - name: Show Build Settings
+      run: xcodebuild -project Telecloud.xcodeproj -scheme Telecloud -showBuildSettings
+
+    - name: Build Archive
+      run: |
+        xcodebuild archive \
+          -project Telecloud.xcodeproj \
+          -scheme Telecloud \
+          -destination "generic/platform=iOS" \
+          -archivePath "build/Telecloud.xcarchive" \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO
+
+    - name: Export IPA
+      run: |
+        # Create export options plist for unsigned export
+        cat > exportOptions.plist << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>method</key>
+            <string>development</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <false/>
+            <key>thinning</key>
+            <string>&lt;none&gt;</string>
+        </dict>
+        </plist>
+        EOF
+
+        # Create Payload directory structure manually
+        mkdir -p build/Payload
+        cp -R build/Telecloud.xcarchive/Products/Applications/Telecloud.app build/Payload/
+
+        # Create IPA (zip file with .ipa extension)
+        cd build
+        zip -r Telecloud.ipa Payload
+        cd ..
+
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Telecloud-unsigned-ipa
+        path: build/Telecloud.ipa
+        retention-days: 30
+        compression-level: 6
+
+    - name: Upload to Release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: build/Telecloud.ipa
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
