@@ -1,0 +1,88 @@
+name: Build MacroTweak
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Theos
+      uses: Randomblock1/theos-action@v1
+      with:
+        theos-dir: 'theos'
+        cache: 'true'
+
+    - name: Build Tweak (Jailed)
+      run: |
+        cd MacroTweak
+        export THEOS=../theos
+        make clean
+        make JAILED=1
+
+    - name: Prepare Artifact
+      run: |
+        mkdir -p artifacts
+        cp MacroTweak/.theos/obj/debug/arm64/MacroTweak.dylib artifacts/MacroTweak.dylib || \
+        cp MacroTweak/.theos/obj/arm64/MacroTweak.dylib artifacts/MacroTweak.dylib || \
+        find MacroTweak -name "*.dylib" -exec cp {} artifacts/MacroTweak.dylib \;
+
+        # Fix rpath for LiveContainer
+        install_name_tool -change /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate @rpath/CydiaSubstrate.framework/CydiaSubstrate artifacts/MacroTweak.dylib || true
+
+        # Create info file
+        echo "MacroTweak for LiveContainer" > artifacts/README.txt
+        echo "Built on: $(date)" >> artifacts/README.txt
+        echo "" >> artifacts/README.txt
+        echo "Installation:" >> artifacts/README.txt
+        echo "1. Copy MacroTweak.dylib to LiveContainer/Tweaks/YourAppBundleID/" >> artifacts/README.txt
+        echo "2. Ensure CydiaSubstrate.framework is in the same folder" >> artifacts/README.txt
+        echo "3. Restart app in LiveContainer" >> artifacts/README.txt
+        echo "" >> artifacts/README.txt
+        echo "Usage:" >> artifacts/README.txt
+        echo "- Long press blue button to record" >> artifacts/README.txt
+        echo "- Tap blue button to playback (2s delay to cancel)" >> artifacts/README.txt
+        echo "- Tap orange button during delay to cancel" >> artifacts/README.txt
+        echo "- Tap red button to stop recording" >> artifacts/README.txt
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MacroTweak-dylib
+        path: artifacts/
+
+    - name: Create Release
+      if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: artifacts/MacroTweak.dylib
+        body: |
+          MacroTweak for LiveContainer
+
+          ## Installation
+          1. Download `MacroTweak.dylib`
+          2. Copy to `LiveContainer/Tweaks/[YourAppBundleID]/`
+          3. Ensure `CydiaSubstrate.framework` is in the same folder
+          4. Restart app in LiveContainer
+
+          ## Usage
+          - **Long press** the floating blue button to start recording
+          - **Tap** the button to playback recorded macro (2 second delay to cancel)
+          - **Tap** the orange button during the delay to cancel playback
+          - **Tap** the red button to stop recording
+
+          ## Features
+          - Records touch events (location, phase, timestamp)
+          - Persists macros between sessions
+          - 30-second auto-stop for recording
+          - Visual overlay with status indicators
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
