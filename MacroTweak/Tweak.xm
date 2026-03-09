@@ -128,17 +128,14 @@ static UILabel *statusLabel = nil;
 %new
 - (void)macroButtonTapped:(UIButton *)sender {
     if (currentState == MacroStateRecording) {
-        // Stop recording
         [self stopRecording];
     } else if (currentState == MacroStateIdle) {
         if (recordedEvents.count > 0) {
-            // Start playback with delay
             [self startPlaybackWithDelay];
         } else {
             [self showStatus:@"No macro recorded! Long press to record"];
         }
     } else if (currentState == MacroStatePlaying) {
-        // Cancel playback
         shouldCancelPlayback = YES;
         [self showStatus:@"Playback cancelled"];
     }
@@ -165,7 +162,6 @@ static UILabel *statusLabel = nil;
         statusLabel.text = @"Recording... Tap to stop";
     });
 
-    // Auto-stop after 30 seconds to prevent huge recordings
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (currentState == MacroStateRecording) {
             [self stopRecording];
@@ -184,7 +180,6 @@ static UILabel *statusLabel = nil;
         statusLabel.text = [NSString stringWithFormat:@"Recorded %lu events", (unsigned long)recordedEvents.count];
     });
 
-    // Save to disk
     [self saveMacro];
 }
 
@@ -192,7 +187,6 @@ static UILabel *statusLabel = nil;
 - (void)startPlaybackWithDelay {
     if (recordedEvents.count == 0) return;
 
-    // Show cancel button immediately
     dispatch_async(dispatch_get_main_queue(), ^{
         macroButton.backgroundColor = [UIColor orangeColor];
         [macroButton setTitle:@"✕" forState:UIControlStateNormal];
@@ -201,7 +195,6 @@ static UILabel *statusLabel = nil;
 
     shouldCancelPlayback = NO;
 
-    // 2 second delay before playback
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!shouldCancelPlayback) {
             [self startPlayback];
@@ -236,7 +229,6 @@ static UILabel *statusLabel = nil;
 
     MacroEvent *event = recordedEvents[playbackIndex];
 
-    // Schedule next event
     NSTimeInterval delay = event.timestamp;
     if (playbackIndex > 0) {
         MacroEvent *prevEvent = recordedEvents[playbackIndex - 1];
@@ -245,9 +237,7 @@ static UILabel *statusLabel = nil;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!shouldCancelPlayback && currentState == MacroStatePlaying) {
-            // Simulate touch event
             [self simulateTouch:event];
-
             playbackIndex++;
             [self playNextEvent];
         }
@@ -256,29 +246,21 @@ static UILabel *statusLabel = nil;
 
 %new
 - (void)simulateTouch:(MacroEvent *)event {
-    // Create touch event using private API
-    // This is a simplified simulation - in production you'd use IOHIDEvent or GSEvent
-
-    // Post notification that can be used by the app or just log it
     NSLog(@"[MacroTweak] Simulating touch at (%.1f, %.1f) phase: %ld", event.location.x, event.location.y, (long)event.phase);
 
-    // Try to find view at location and send touch
     UIWindow *keyWindow = [[UIApplication sharedApplication] keyWindow];
     UIView *targetView = [keyWindow hitTest:event.location withEvent:nil];
 
     if (targetView) {
-        // Create a synthetic touch
         UITouch *touch = [[UITouch alloc] init];
         [touch setValue:[NSValue valueWithCGPoint:event.location] forKey:@"_locationInWindow"];
         [touch setValue:@(event.phase) forKey:@"_phase"];
         [touch setValue:targetView forKey:@"_view"];
         [touch setValue:keyWindow forKey:@"_window"];
 
-        // Create event
         UIEvent *uiEvent = [[UIEvent alloc] init];
         [uiEvent setValue:[NSSet setWithObject:touch] forKey:@"_touches"];
 
-        // Send to application
         [[UIApplication sharedApplication] sendEvent:uiEvent];
     }
 }
@@ -298,8 +280,6 @@ static UILabel *statusLabel = nil;
 - (void)showStatus:(NSString *)message {
     dispatch_async(dispatch_get_main_queue(), ^{
         statusLabel.text = message;
-
-        // Fade out after 2 seconds
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (![statusLabel.text isEqualToString:message]) return;
             statusLabel.text = @"Ready";
@@ -360,7 +340,6 @@ static UILabel *statusLabel = nil;
 
 %end
 
-// Constructor - runs when tweak is loaded
 %ctor {
     NSLog(@"[MacroTweak] Loaded successfully");
 }
