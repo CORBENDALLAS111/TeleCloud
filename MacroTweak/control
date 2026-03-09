@@ -1,0 +1,9 @@
+Package: com.yourname.macrotweak
+Name: MacroTweak
+Depends: mobilesubstrate
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Record and replay touch macros with 2s delay overlay for LiveContainer
+Maintainer: Your Name
+Author: Your Name
+Section: Tweaks
