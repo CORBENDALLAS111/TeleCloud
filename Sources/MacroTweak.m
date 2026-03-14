@@ -28,26 +28,7 @@ static os_log_t g_log;
 #define MLOG_ERR(fmt, ...) os_log_error (g_log, "[MacroTweak][ERROR] " fmt, ##__VA_ARGS__)
 #define MLOG_DBG(fmt, ...) os_log_debug (g_log, "[MacroTweak][DBG] "   fmt, ##__VA_ARGS__)
 
-// =============================================================================
-// MARK: - Private UIKit APIs for synthetic touch replay
-// =============================================================================
-@interface UITouch (MacroPrivate)
-- (instancetype)_initWithTapCount:(NSUInteger)tapCount touchType:(NSInteger)type;
-- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)reset;
-- (void)_setPhase:(UITouchPhase)phase;
-- (void)_setView:(UIView *)view;
-- (void)_setWindow:(UIWindow *)window;
-- (void)_setTimestamp:(NSTimeInterval)timestamp;
-- (void)_setSentTouchesForEvent:(UIEvent *)event;
-@end
-
-@interface UIEvent (MacroPrivate)
-+ (instancetype)_eventRelativeToWindow;
-- (void)_setTimestamp:(NSTimeInterval)timestamp;
-- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
-- (void)_clearTouches;
-@end
-
+// Private UITouch/UIEvent setters — declared near use site inside @implementation MacroTweakManager
 // =============================================================================
 // MARK: - MacroTouchEvent (recorded data model)
 // =============================================================================
@@ -117,6 +98,9 @@ typedef NS_ENUM(NSInteger, MacroState) {
 @property (nonatomic) NSInteger        countdownValue;
 @property (nonatomic, strong) NSTimer *countdownTimer;
 
+/// Reused across a single gesture sequence (Began → Moved* → Ended/Cancelled)
+@property (nonatomic, strong) UITouch *activeTouch;
+
 + (instancetype)sharedManager;
 
 - (void)setupOverlayInScene:(UIWindowScene *)scene;
@@ -134,10 +118,9 @@ typedef NS_ENUM(NSInteger, MacroState) {
 // =============================================================================
 // MARK: - MacroOverlayWindow
 // =============================================================================
-@interface MacroOverlayWindow : UIWindow
+@interface MacroOverlayWindow : UIWindow <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIButton *actionButton;
 @property (nonatomic, strong) UILabel  *statusLabel;
-@property (nonatomic, strong) UILabel  *watermarkLabel;
 - (void)updateForState:(MacroState)state countdownValue:(NSInteger)countdown;
 @end
 
@@ -159,22 +142,22 @@ typedef NS_ENUM(NSInteger, MacroState) {
 
 - (void)_buildUI {
     // Window-level config
-    self.windowLevel          = CGFLOAT_MAX;
-    self.backgroundColor      = [UIColor clearColor];
+    self.windowLevel           = CGFLOAT_MAX;
+    self.backgroundColor       = [UIColor clearColor];
     self.userInteractionEnabled = YES;
-    self.alpha                = 1.0;
+    self.alpha                 = 1.0;
 
     // Transparent root view controller
-    UIViewController *root    = [[UIViewController alloc] init];
-    root.view.backgroundColor = [UIColor clearColor];
+    UIViewController *root     = [[UIViewController alloc] init];
+    root.view.backgroundColor  = [UIColor clearColor];
     root.view.userInteractionEnabled = YES;
-    self.rootViewController   = root;
+    self.rootViewController    = root;
 
     // ─── Floating Action Button ─────────────────────────────────────────────
     _actionButton = [UIButton buttonWithType:UIButtonTypeCustom];
     _actionButton.frame = CGRectMake(0, 0, 50, 50);
     _actionButton.layer.cornerRadius  = 25;
-    _actionButton.layer.masksToBounds = NO;   // allow shadow outside clip
+    _actionButton.layer.masksToBounds = NO;
     _actionButton.titleLabel.font = [UIFont boldSystemFontOfSize:24];
     _actionButton.titleLabel.adjustsFontSizeToFitWidth = YES;
     [_actionButton setTitle:@"●" forState:UIControlStateNormal];
@@ -191,11 +174,20 @@ typedef NS_ENUM(NSInteger, MacroState) {
                       action:@selector(_buttonTapped:)
             forControlEvents:UIControlEventTouchUpInside];
 
+    // Long-press → start recording
     UILongPressGestureRecognizer *lp =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self
                                                       action:@selector(_longPressed:)];
     lp.minimumPressDuration = 0.6;
+    lp.delegate = self;
     [_actionButton addGestureRecognizer:lp];
+
+    // Pan → drag button around screen
+    UIPanGestureRecognizer *pan =
+        [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                action:@selector(_buttonDragged:)];
+    pan.delegate = self;
+    [_actionButton addGestureRecognizer:pan];
 
     // ─── Status Label ───────────────────────────────────────────────────────
     _statusLabel                 = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -207,20 +199,10 @@ typedef NS_ENUM(NSInteger, MacroState) {
     _statusLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.65];
     _statusLabel.layer.cornerRadius  = 7;
     _statusLabel.layer.masksToBounds = YES;
-
-    // ─── Watermark ──────────────────────────────────────────────────────────
-    _watermarkLabel                 = [[UILabel alloc] initWithFrame:CGRectZero];
-    _watermarkLabel.text            = @"🔥 MACRO TWEAK LOADED 🔥";
-    _watermarkLabel.textColor       = [[UIColor systemOrangeColor] colorWithAlphaComponent:0.9];
-    _watermarkLabel.font            = [UIFont boldSystemFontOfSize:11];
-    _watermarkLabel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
-    _watermarkLabel.textAlignment   = NSTextAlignmentCenter;
-    _watermarkLabel.layer.cornerRadius  = 7;
-    _watermarkLabel.layer.masksToBounds = YES;
+    _statusLabel.userInteractionEnabled = NO;
 
     [root.view addSubview:_actionButton];
     [root.view addSubview:_statusLabel];
-    [root.view addSubview:_watermarkLabel];
 
     [self _relayout];
 
@@ -231,26 +213,99 @@ typedef NS_ENUM(NSInteger, MacroState) {
              object:nil];
 }
 
+// ─── Saved position keys ────────────────────────────────────────────────────
+static NSString * const kButtonX = @"MacroTweak_ButtonX";
+static NSString * const kButtonY = @"MacroTweak_ButtonY";
+
 - (void)_relayout {
-    CGRect screen = UIScreen.mainScreen.bounds;
-    CGFloat W = screen.size.width;
-    CGFloat H = screen.size.height;
-    CGFloat margin = 16;
+    CGRect  screen  = UIScreen.mainScreen.bounds;
+    CGFloat W       = screen.size.width;
+    CGFloat H       = screen.size.height;
+    CGFloat margin  = 12;
 
-    // Button: top-right, respect safe area (status bar ~44pt + extra 36)
-    _actionButton.frame = CGRectMake(W - 50 - margin, 80, 50, 50);
+    // Restore saved position, or default to top-right
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    CGFloat bx, by;
+    if ([ud objectForKey:kButtonX]) {
+        bx = [ud doubleForKey:kButtonX];
+        by = [ud doubleForKey:kButtonY];
+    } else {
+        bx = W  - 50 - margin;
+        by = 80;
+    }
 
-    // Status label: 130×22, centred below button
-    _statusLabel.frame  = CGRectMake(W - 130 - margin + 40, 135, 130, 22);
+    // Clamp so button never goes off-screen after rotation
+    bx = MAX(margin, MIN(bx, W - 50 - margin));
+    by = MAX(60,     MIN(by, H - 80));
 
-    // Watermark: bottom-left above home indicator
-    CGSize wSz = [_watermarkLabel sizeThatFits:CGSizeMake(320, 26)];
-    _watermarkLabel.frame = CGRectMake(margin, H - 70, wSz.width + 20, 26);
+    _actionButton.frame = CGRectMake(bx, by, 50, 50);
+    [self _updateStatusLabelRelativeToButton];
+}
+
+// Place status label left-of-button, or below when near the left edge
+- (void)_updateStatusLabelRelativeToButton {
+    CGRect  bf     = _actionButton.frame;
+    CGRect  screen = UIScreen.mainScreen.bounds;
+    CGFloat lw     = 138, lh = 22;
+    CGFloat lx, ly;
+
+    if (bf.origin.x >= lw + 8) {
+        // enough room to the left
+        lx = bf.origin.x - lw - 4;
+        ly = bf.origin.y + (50 - lh) / 2.0;
+    } else if (bf.origin.x + 50 + lw + 4 <= screen.size.width) {
+        // enough room to the right
+        lx = bf.origin.x + 54;
+        ly = bf.origin.y + (50 - lh) / 2.0;
+    } else {
+        // fall below
+        lx = MAX(8, bf.origin.x - (lw - 50) / 2.0);
+        ly = bf.origin.y + 56;
+    }
+    _statusLabel.frame = CGRectMake(lx, ly, lw, lh);
+}
+
+// ─── Pan gesture — drag button ───────────────────────────────────────────────
+- (void)_buttonDragged:(UIPanGestureRecognizer *)pan {
+    UIView  *root   = self.rootViewController.view;
+    CGPoint  delta  = [pan translationInView:root];
+    CGRect   screen = UIScreen.mainScreen.bounds;
+
+    CGRect f  = _actionButton.frame;
+    CGFloat nx = MAX(12, MIN(f.origin.x + delta.x, screen.size.width  - 62));
+    CGFloat ny = MAX(60, MIN(f.origin.y + delta.y, screen.size.height - 80));
+
+    _actionButton.frame = CGRectMake(nx, ny, 50, 50);
+    [self _updateStatusLabelRelativeToButton];
+    [pan setTranslation:CGPointZero inView:root];
+
+    if (pan.state == UIGestureRecognizerStateEnded ||
+        pan.state == UIGestureRecognizerStateCancelled) {
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        [ud setDouble:nx forKey:kButtonX];
+        [ud setDouble:ny forKey:kButtonY];
+        [ud synchronize];
+        MLOG_DBG("Button position saved: (%.0f, %.0f)", nx, ny);
+    }
+}
+
+// Allow pan + long-press to fire simultaneously so dragging doesn't kill record
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)a
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)b {
+    return YES;
 }
 
 - (void)_deviceRotated:(NSNotification *)note {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ [self _relayout]; });
+    // Re-clamp existing position to new bounds after rotation settles
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        CGRect  screen = UIScreen.mainScreen.bounds;
+        CGRect  f      = self.actionButton.frame;
+        CGFloat nx     = MAX(12, MIN(f.origin.x, screen.size.width  - 62));
+        CGFloat ny     = MAX(60, MIN(f.origin.y, screen.size.height - 80));
+        self.actionButton.frame = CGRectMake(nx, ny, 50, 50);
+        [self _updateStatusLabelRelativeToButton];
+    });
 }
 
 // ─── State appearance ───────────────────────────────────────────────────────
@@ -410,7 +465,24 @@ typedef NS_ENUM(NSInteger, MacroState) {
     _overlayReady      = YES;
     [win updateForState:MacroStateReady countdownValue:0];
 
-    MLOG("Overlay window is live. Watermark visible.");
+    MLOG("Overlay window is live.");
+
+    // ── Auto-play saved macro 10 seconds after app launch ────────────────────
+    if (_savedMacro.count > 0) {
+        MLOG("Saved macro found (%lu events) — will auto-play in 10s",
+             (unsigned long)_savedMacro.count);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            // Only fire if user hasn't manually started recording or playback
+            if (self.state == MacroStateReady && self.savedMacro.count > 0) {
+                MLOG("Auto-play timer fired — starting playback");
+                [self startPlayback];
+            } else {
+                MLOG("Auto-play timer fired but state=%ld — skipping",
+                     (long)self.state);
+            }
+        });
+    }
 }
 
 // =============================================================================
@@ -581,50 +653,98 @@ typedef NS_ENUM(NSInteger, MacroState) {
 // =============================================================================
 // MARK: - Touch simulation
 // =============================================================================
+
+// We declare the private initialisers we actually call so the compiler stops
+// complaining about unknown selectors.  They are resolved at runtime.
+@interface UITouch (MacroSim)
+- (instancetype)_initWithTapCount:(NSUInteger)tapCount touchType:(NSInteger)type;
+- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)reset;
+- (void)_setPhase:(UITouchPhase)phase;
+- (void)_setView:(UIView *)view;
+- (void)_setWindow:(UIWindow *)window;
+- (void)_setTimestamp:(NSTimeInterval)timestamp;
+@end
+
+@interface UIEvent (MacroSim)
+- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
+- (void)_clearTouches;
+@end
+
+@interface UIApplication (MacroSim)
+- (UIEvent *)_touchesEvent;
+@end
+
 - (void)_simulateEvent:(MacroTouchEvent *)event {
     UIWindow *appWin = [self _appWindow];
     if (!appWin) {
-        MLOG_ERR("No app window found for simulation");
+        MLOG_ERR("No app window for simulation");
         return;
     }
 
-    CGPoint pt = event.locationInWindow;
-    MLOG_DBG("Simulating phase=%ld at (%.1f,%.1f)", (long)event.phase, pt.x, pt.y);
+    CGPoint pt  = event.locationInWindow;
+    MLOG_DBG("Simulate phase=%ld at (%.1f,%.1f)", (long)event.phase, pt.x, pt.y);
 
-    // ── Primary path: private UITouch/UIEvent API ─────────────────────────
-    BOOL privateAPIAvailable =
-        [UITouch instancesRespondToSelector:NSSelectorFromString(@"_setLocationInWindow:resetPrevious:")] &&
-        [UIEvent  respondsToSelector:NSSelectorFromString(@"_eventRelativeToWindow")];
+    // ── Primary path: private UITouch/UIApplication API ─────────────────────
+    // Key fixes vs. old code:
+    //  1. Use _initWithTapCount:touchType: (type 0 = direct touch)
+    //  2. Reuse the SAME UITouch object for the whole gesture sequence
+    //  3. Use UIApplication._touchesEvent instead of UIEvent._eventRelativeToWindow
+    //  4. Use current wall-clock time, not recorded timestamp
+    @try {
+        // On Began: allocate a fresh UITouch.  On subsequent phases reuse it
+        // so UIKit sees it as one continuous gesture.
+        if (event.phase == UITouchPhaseBegan || self.activeTouch == nil) {
+            self.activeTouch = [[UITouch alloc] _initWithTapCount:1 touchType:0];
+        }
 
-    if (privateAPIAvailable) {
-        @try {
-            // Create a synthetic UITouch
-            UITouch *touch = [[UITouch alloc] init];
-            [touch _setLocationInWindow:pt resetPrevious:YES];
-            [touch _setPhase:event.phase];
-            [touch _setWindow:appWin];
-            [touch _setTimestamp:event.timestamp];
+        UITouch *touch = self.activeTouch;
 
-            UIView *hitView = [appWin hitTest:pt withEvent:nil];
-            if (hitView) [touch _setView:hitView];
+        // resetPrevious=YES only on Began so UIKit knows the gesture started
+        BOOL reset = (event.phase == UITouchPhaseBegan);
+        [touch _setLocationInWindow:pt resetPrevious:reset];
+        [touch _setPhase:event.phase];
+        [touch _setWindow:appWin];
+        [touch _setTimestamp:CACurrentMediaTime()];
 
-            // Create a synthetic UIEvent and inject
-            UIEvent *synEvent = [UIEvent _eventRelativeToWindow];
-            [synEvent _addTouch:touch forDelayedDelivery:NO];
-            [[UIApplication sharedApplication] sendEvent:synEvent];
-            [synEvent _clearTouches];
+        // Hit-test to find the target view at recorded coordinates
+        UIView *hitView = [appWin hitTest:pt withEvent:nil];
+        if (hitView) [touch _setView:hitView];
 
-            MLOG_DBG("Injected via private UITouch API");
+        // _touchesEvent returns the shared mutable UIEvent that UIKit uses
+        // for real touches — safer than _eventRelativeToWindow on iOS 16+
+        UIApplication *app = [UIApplication sharedApplication];
+        UIEvent *synEvent  = [app _touchesEvent];
+        if (!synEvent) {
+            MLOG_ERR("_touchesEvent returned nil — falling back to responder chain");
+            [self _simulateViaResponderChain:event appWindow:appWin];
             return;
         }
-        @catch (NSException *ex) {
-            MLOG_ERR("Private API exception: %{public}@", ex.reason);
+
+        [synEvent _addTouch:touch forDelayedDelivery:NO];
+        [app sendEvent:synEvent];
+        [synEvent _clearTouches];
+
+        // Discard touch object after gesture ends
+        if (event.phase == UITouchPhaseEnded ||
+            event.phase == UITouchPhaseCancelled) {
+            self.activeTouch = nil;
         }
+
+        MLOG_DBG("Injected via private API ✓");
+        return;
+    }
+    @catch (NSException *ex) {
+        MLOG_ERR("Private API exception: %{public}@ — using responder fallback", ex.reason);
+        self.activeTouch = nil;
     }
 
-    // ── Fallback: responder-chain dispatch ────────────────────────────────
-    MLOG("Using responder-chain fallback for simulation");
-    UIView *target = [appWin hitTest:pt withEvent:nil] ?: appWin;
+    [self _simulateViaResponderChain:event appWindow:appWin];
+}
+
+// ── Responder-chain fallback (works well for UIControl taps) ─────────────────
+- (void)_simulateViaResponderChain:(MacroTouchEvent *)event appWindow:(UIWindow *)win {
+    CGPoint   pt     = event.locationInWindow;
+    UIView   *target = [win hitTest:pt withEvent:nil] ?: win;
 
     switch (event.phase) {
         case UITouchPhaseBegan:
@@ -635,7 +755,6 @@ typedef NS_ENUM(NSInteger, MacroState) {
             break;
         case UITouchPhaseEnded:
             [target touchesEnded:[NSSet set] withEvent:nil];
-            // Also send primary action for UIControl targets
             if ([target isKindOfClass:[UIControl class]]) {
                 [(UIControl *)target sendActionsForControlEvents:UIControlEventTouchUpInside];
             }
