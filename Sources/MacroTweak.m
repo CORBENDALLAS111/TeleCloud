@@ -113,6 +113,17 @@ typedef NS_ENUM(NSInteger, MacroState) {
 - (void)_replayNow;
 - (void)_dispatchEvents:(NSArray<MacroTouchEvent *> *)events atIndex:(NSUInteger)idx;
 
+// Private helpers
+- (void)_activateWindow:(MacroOverlayWindow *)win;
+- (UIWindow *)_appWindow;
+- (void)_simulateEvent:(MacroTouchEvent *)event;
+- (void)_simulateViaResponderChain:(MacroTouchEvent *)event appWindow:(UIWindow *)win;
+- (NSString *)_macroPath;
+- (void)_saveMacroToDisk;
+- (void)_loadMacroFromDisk;
+- (void)_autoStop:(NSTimer *)t;
+- (void)_countdownTick:(NSTimer *)timer;
+
 @end
 
 // =============================================================================
@@ -385,6 +396,28 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)b {
 @end   // MacroOverlayWindow
 
 // =============================================================================
+// MARK: - Private UIKit category declarations (file-scope, before implementation)
+// These must live outside any @implementation block.
+// =============================================================================
+@interface UITouch (MacroSim)
+- (instancetype)_initWithTapCount:(NSUInteger)tapCount touchType:(NSInteger)type;
+- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)reset;
+- (void)_setPhase:(UITouchPhase)phase;
+- (void)_setView:(UIView *)view;
+- (void)_setWindow:(UIWindow *)window;
+- (void)_setTimestamp:(NSTimeInterval)timestamp;
+@end
+
+@interface UIEvent (MacroSim)
+- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
+- (void)_clearTouches;
+@end
+
+@interface UIApplication (MacroSim)
+- (UIEvent *)_touchesEvent;
+@end
+
+// =============================================================================
 // MARK: - MacroTweakManager @implementation
 // =============================================================================
 @implementation MacroTweakManager
@@ -653,26 +686,6 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)b {
 // =============================================================================
 // MARK: - Touch simulation
 // =============================================================================
-
-// We declare the private initialisers we actually call so the compiler stops
-// complaining about unknown selectors.  They are resolved at runtime.
-@interface UITouch (MacroSim)
-- (instancetype)_initWithTapCount:(NSUInteger)tapCount touchType:(NSInteger)type;
-- (void)_setLocationInWindow:(CGPoint)location resetPrevious:(BOOL)reset;
-- (void)_setPhase:(UITouchPhase)phase;
-- (void)_setView:(UIView *)view;
-- (void)_setWindow:(UIWindow *)window;
-- (void)_setTimestamp:(NSTimeInterval)timestamp;
-@end
-
-@interface UIEvent (MacroSim)
-- (void)_addTouch:(UITouch *)touch forDelayedDelivery:(BOOL)delayed;
-- (void)_clearTouches;
-@end
-
-@interface UIApplication (MacroSim)
-- (UIEvent *)_touchesEvent;
-@end
 
 - (void)_simulateEvent:(MacroTouchEvent *)event {
     UIWindow *appWin = [self _appWindow];
