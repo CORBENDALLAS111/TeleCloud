@@ -96,9 +96,40 @@ typedef NS_ENUM(NSInteger, MacroState) {
 };
 
 // =============================================================================
-// MARK: - MacroTweakManager (forward declaration)
+// MARK: - MacroTweakManager (full interface declared early so MacroOverlayWindow
+//         can call [MacroTweakManager sharedManager] and access its properties)
 // =============================================================================
-@class MacroTweakManager;
+@class MacroOverlayWindow;   // forward-declare the window instead
+
+@interface MacroTweakManager : NSObject {
+    BOOL _overlayReady;
+}
+
+@property (nonatomic, strong) MacroOverlayWindow              *overlayWindow;
+@property (nonatomic, strong) NSMutableArray<MacroTouchEvent *> *recordingBuffer;
+@property (nonatomic, strong) NSArray<MacroTouchEvent *>       *savedMacro;
+@property (nonatomic)         MacroState                        state;
+
+@property (nonatomic) NSTimeInterval  recordingStart;
+@property (nonatomic) NSTimeInterval  lastEventTime;
+@property (nonatomic, strong) NSTimer *autoStopTimer;
+
+@property (nonatomic) NSInteger        countdownValue;
+@property (nonatomic, strong) NSTimer *countdownTimer;
+
++ (instancetype)sharedManager;
+
+- (void)setupOverlayInScene:(UIWindowScene *)scene;
+- (void)setupOverlayFallback;
+- (void)handleTouchEvent:(UIEvent *)event;
+- (void)startRecording;
+- (void)stopRecording;
+- (void)startPlayback;
+- (void)cancelPlayback;
+- (void)_replayNow;
+- (void)_dispatchEvents:(NSArray<MacroTouchEvent *> *)events atIndex:(NSUInteger)idx;
+
+@end
 
 // =============================================================================
 // MARK: - MacroOverlayWindow
@@ -299,43 +330,8 @@ typedef NS_ENUM(NSInteger, MacroState) {
 @end   // MacroOverlayWindow
 
 // =============================================================================
-// MARK: - MacroTweakManager
+// MARK: - MacroTweakManager @implementation
 // =============================================================================
-@interface MacroTweakManager : NSObject {
-    BOOL _overlayReady;
-}
-
-@property (nonatomic, strong) MacroOverlayWindow              *overlayWindow;
-@property (nonatomic, strong) NSMutableArray<MacroTouchEvent *> *recordingBuffer;
-@property (nonatomic, strong) NSArray<MacroTouchEvent *>       *savedMacro;
-@property (nonatomic)         MacroState                        state;
-
-// Recording helpers
-@property (nonatomic) NSTimeInterval  recordingStart;
-@property (nonatomic) NSTimeInterval  lastEventTime;
-@property (nonatomic, strong) NSTimer *autoStopTimer;
-
-// Countdown helpers
-@property (nonatomic) NSInteger        countdownValue;
-@property (nonatomic, strong) NSTimer *countdownTimer;
-
-+ (instancetype)sharedManager;
-
-- (void)setupOverlayInScene:(UIWindowScene *)scene;
-- (void)setupOverlayFallback;
-
-- (void)handleTouchEvent:(UIEvent *)event;
-
-- (void)startRecording;
-- (void)stopRecording;
-
-- (void)startPlayback;
-- (void)cancelPlayback;
-- (void)_replayNow;
-- (void)_dispatchEvents:(NSArray<MacroTouchEvent *> *)events atIndex:(NSUInteger)idx;
-
-@end
-
 @implementation MacroTweakManager
 
 + (instancetype)sharedManager {
@@ -668,10 +664,14 @@ typedef NS_ENUM(NSInteger, MacroState) {
             }
         }
     }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    // iOS 12 fallback — suppressed deprecation: scene path above handles iOS 13+
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         if (w == _overlayWindow) continue;
         if (!w.isHidden) return w;
     }
+#pragma clang diagnostic pop
     return nil;
 }
 
@@ -686,12 +686,14 @@ typedef NS_ENUM(NSInteger, MacroState) {
 - (void)_saveMacroToDisk {
     NSError *err = nil;
 
-    // Use a mutable data + NSKeyedArchiver for iOS 11+ API
-    NSMutableData *data = [NSMutableData data];
-    NSKeyedArchiver *archiver = [[NSKeyedArchiver alloc] initForWritingWithMutableData:data];
-    archiver.requiresSecureCoding = NO;
-    [archiver encodeObject:_savedMacro forKey:NSKeyedArchiveRootObjectKey];
-    [archiver finishEncoding];
+    // Modern API (iOS 11+) — no deprecation warning
+    NSData *data = [NSKeyedArchiver archivedDataWithRootObject:_savedMacro
+                                        requiringSecureCoding:NO
+                                                        error:&err];
+    if (!data || err) {
+        MLOG_ERR("Failed to archive macro: %{public}@", err.localizedDescription);
+        return;
+    }
 
     BOOL ok = [data writeToFile:[self _macroPath]
                         options:NSDataWritingAtomic
