@@ -1,0 +1,95 @@
+# =============================================================================
+# .github/workflows/build.yml
+# Builds MacroTweak.dylib on macOS using the iOS SDK, then signs with ldid.
+# Produces a downloadable artifact on every push / PR / manual trigger.
+# =============================================================================
+
+name: Build MacroTweak
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "Sources/**"
+      - "Makefile"
+      - ".github/workflows/build.yml"
+  pull_request:
+    branches: ["main", "master"]
+  workflow_dispatch:          # allow manual runs from the Actions tab
+
+# Cancel in-progress runs on the same branch to save minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Sign (arm64 iOS 16.2+)
+    runs-on: macos-14          # Apple-silicon runner — has Xcode 15+
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Select Xcode (14.3+ contains iOS 16 SDK) ─────────────────────────
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # ── 3. Install ldid ──────────────────────────────────────────────────────
+      - name: Install ldid
+        run: |
+          brew install ldid
+          ldid 2>&1 | head -1 || true    # print version line (ldid exits non-zero)
+
+      # ── 4. Show build info ───────────────────────────────────────────────────
+      - name: Print toolchain info
+        run: make info
+
+      # ── 5. Build dylib ───────────────────────────────────────────────────────
+      - name: Build MacroTweak.dylib
+        run: make build
+
+      # ── 6. Sign with ldid -S ─────────────────────────────────────────────────
+      - name: Sign dylib (ldid -S)
+        run: make sign
+
+      # ── 7. Verify output ─────────────────────────────────────────────────────
+      - name: Verify binary
+        run: |
+          echo "=== file ==="
+          file MacroTweak.dylib
+
+          echo "=== otool -l | grep RPATH ==="
+          otool -l MacroTweak.dylib | grep -A 3 LC_RPATH || echo "(no LC_RPATH)"
+
+          echo "=== otool -l | grep CODE ==="
+          otool -l MacroTweak.dylib | grep -A 4 LC_CODE_SIGNATURE || echo "(no code signature)"
+
+          echo "=== undefined symbols (CydiaSubstrate expected) ==="
+          nm -u MacroTweak.dylib | head -30
+
+          echo "=== size ==="
+          ls -lh MacroTweak.dylib
+
+      # ── 8. Upload artifact ───────────────────────────────────────────────────
+      - name: Upload MacroTweak.dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacroTweak-dylib-${{ github.sha }}
+          path: MacroTweak.dylib
+          if-no-files-found: error
+          retention-days: 30
+
+      # ── 9. (Optional) Create release on version tags ─────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MacroTweak.dylib
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
